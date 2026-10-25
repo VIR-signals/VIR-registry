@@ -1,0 +1,14 @@
+{
+  "id": "your-pack-name",
+  "names": { "zh-cn": "你的包显示名", "en": "Your Pack Name" },
+  "categories": ["ui"],
+  "language": "none",
+  "author": "YourName",
+  "version": "1.0.0",
+  "repo": "yourname/your-pack-repo",
+  "branch": "main",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "packPath": "pack",
+  "license": "CC0-1.0",
+  "sourceLicense": "third-party-cc0"
+}
