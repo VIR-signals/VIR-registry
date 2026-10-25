@@ -147,6 +147,13 @@ function class01To12() {
   fs.writeFileSync(path.join(packsDir, 'notes.txt'), 'x');
   res = runValidate(packsDir, registry);
   ok('extra/non-json-file', res.status === 1 && errOf(res).includes('dir.non-json'), errOf(res));
+  // the aggregator refuses the same shape instead of skipping it silently
+  const agg = runAggregate(packsDir, registry);
+  ok('extra/aggregate-non-json-aborts', agg.status === 1 && errOf(agg).includes('dir.non-json'), errOf(agg));
+  fs.rmSync(path.join(packsDir, 'notes.txt'));
+  fs.mkdirSync(path.join(packsDir, 'subdir'));
+  const aggDir = runAggregate(packsDir, registry);
+  ok('extra/aggregate-subdir-aborts', aggDir.status === 1 && errOf(aggDir).includes('dir.non-json'), errOf(aggDir));
 }
 
 // --------------------------------------------------------- valid counter-examples

@@ -50,9 +50,19 @@ function orderEntry(entry) {
 }
 
 function aggregate(packsDir) {
-  const names = fs.readdirSync(packsDir).filter((n) => n.endsWith('.json')).sort();
+  const names = fs.readdirSync(packsDir).sort();
+  // Same rule as the validator: anything in the source area that is not a
+  // JSON entry (and not the shipped placeholder) aborts the run instead of
+  // being silently skipped.
+  for (const n of names) {
+    if (n === '.gitkeep') continue;
+    if (!n.endsWith('.json')) {
+      throw new Error('dir.non-json:' + n);
+    }
+  }
   const byId = new Map();
   for (const relName of names) {
+    if (relName === '.gitkeep') continue;
     const entry = readEntry(path.join(packsDir, relName), relName);
     if (byId.has(entry.id)) {
       throw new Error('id.duplicate:' + entry.id + ':' + relName);
