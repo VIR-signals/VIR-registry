@@ -76,7 +76,7 @@ node aggregate.js
 | 11 | language 大写或非 BCP-47 | `language.format` |
 | 12 | branch 为空 | `field.required:branch` |
 
-其他可能出现的 key：`json.parse`（文件不是合法 JSON）、`entry.not-object`（顶层不是对象）、`dir.non-json`（`packs/` 下出现非 JSON 文件）、`registry.missing` / `registry.schema` / `registry.mismatch`（聚合产物缺失、schema 不对、或与 `packs/` 不同步——重跑 `node aggregate.js` 即可）。
+其他可能出现的 key：`json.parse`（文件不是合法 JSON）、`entry.not-object`（顶层不是对象）、`dir.non-json`（`packs/` 下出现非 JSON 文件）、`names.type` / `categories.type`（`names` 或 `categories` 的 JSON 类型不对）、`categories.value`（分类越枚举）、`registry.missing` / `registry.schema` / `registry.mismatch`（聚合产物缺失、schema 不对、或与 `packs/` 不同步——重跑 `node aggregate.js` 即可）。
 
 ## 测试
 

@@ -76,7 +76,7 @@ Run `node validate.js` locally; each violation prints `file: reason-key`. The tw
 | 11 | language uppercase or not a BCP-47 tag | `language.format` |
 | 12 | branch empty | `field.required:branch` |
 
-Additional keys you may see: `json.parse` (file is not valid JSON), `entry.not-object` (top level is not an object), `dir.non-json` (a non-JSON file under `packs/`), `registry.missing` / `registry.schema` / `registry.mismatch` (the generated index is absent, wrong schema, or out of sync with `packs/` — rerun `node aggregate.js`).
+Additional keys you may see: `json.parse` (file is not valid JSON), `entry.not-object` (top level is not an object), `dir.non-json` (a non-JSON file under `packs/`), `names.type` / `categories.type` (`names` or `categories` has the wrong JSON type), `categories.value` (a category outside the enum), `registry.missing` / `registry.schema` / `registry.mismatch` (the generated index is absent, wrong schema, or out of sync with `packs/` — rerun `node aggregate.js`).
 
 ## Tests
 
