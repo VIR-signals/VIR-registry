@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Test runner for the VIR registry: twelve bad-entry classes, valid
 // counter-examples, aggregation determinism, filename/id linkage,
-// empty-state shape, registry consistency, and CI workflow structure.
+// empty-state shape, registry consistency, and CI workflow structure, plus
+// an offline liveness suite for probe.js driven by deterministic io stubs.
 // Runs validate.js and aggregate.js as real child processes against
 // fixtures created in a fresh system temp directory per case.
 // Writes a report triple (results.json / console.txt / summary.md)
@@ -317,6 +318,354 @@ function argsCases() {
   ok('args/invalid-rejected', res.status === 1 && errOf(res).includes('args.invalid'), errOf(res));
 }
 
+// ------------------------------------------------------------- probe suite
+
+// Offline coverage for probe.js: entry defense, repo and commit liveness,
+// manifest shape, audio path and cap boundaries, target collection, and
+// the probe wiring inside the CI workflow. Every network answer comes from
+// a deterministic stub io keyed by url, so the suite never touches the real
+// network. These cases are async because probeEntry awaits its io seam.
+
+const probe = require(path.join(ROOT, 'probe.js'));
+
+const PROBE_REPO = 'someone/demo-pack';
+const PROBE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const COMMIT_URL = 'https://api.github.com/repos/' + PROBE_REPO + '/commits/' + PROBE_COMMIT;
+const REPO_URL = 'https://api.github.com/repos/' + PROBE_REPO;
+const RAW_BASE = 'https://raw.githubusercontent.com/' + PROBE_REPO + '/' + PROBE_COMMIT + '/pack/';
+const MANIFEST_URL = RAW_BASE + 'manifest.json';
+
+// The minimal entry shape probeEntry consumes: identity fields for the
+// manifest comparison plus the three locator fields.
+function probeFixture(overrides) {
+  return Object.assign({
+    id: 'demo-pack',
+    version: '1.0.0',
+    repo: PROBE_REPO,
+    commit: PROBE_COMMIT,
+    packPath: 'pack',
+  }, overrides || {});
+}
+
+function manifestBody(fields) {
+  return JSON.stringify(Object.assign({ id: 'demo-pack', version: '1.0.0' }, fields || {}));
+}
+
+// A live commit endpoint plus a fetchable manifest for the given slot map;
+// per-file answers are added by the caller.
+function liveBase(slots) {
+  const responses = {};
+  responses[COMMIT_URL] = { status: 200 };
+  responses[MANIFEST_URL] = { status: 200, text: manifestBody({ slots: slots }) };
+  return responses;
+}
+
+// Stub io seam: answers are keyed by url and any unplanned url throws, so a
+// missing fixture can never pass silently. Every call is recorded so cases
+// can also assert the exact traffic that happened.
+function stubIo(responses) {
+  const calls = [];
+  return {
+    calls,
+    async fetchStatus(url) {
+      calls.push('status ' + url);
+      const hit = responses[url];
+      if (!hit) throw new Error('unplanned status request ' + url);
+      return { status: hit.status, length: hit.length || 0 };
+    },
+    async fetchText(url) {
+      calls.push('text ' + url);
+      const hit = responses[url];
+      if (!hit) throw new Error('unplanned text request ' + url);
+      return { status: hit.status, text: hit.text || '' };
+    },
+  };
+}
+
+async function runProbe(entry, responses) {
+  const io = stubIo(responses);
+  const errors = [];
+  await probe.probeEntry(entry, 'demo-pack.json', io, errors);
+  return { errors, calls: io.calls };
+}
+
+// The total cap boundary needs several files: every file must stay within
+// the per-file cap, so the fill is whole files of exactly the per-file cap
+// plus one remainder file, summing to exactly the total cap.
+function capFillSizes() {
+  const per = probe.caps.PER_FILE_CAP_BYTES;
+  const total = probe.caps.TOTAL_CAP_BYTES;
+  const sizes = [];
+  const count = Math.ceil(total / per);
+  for (let i = 0; i < count - 1; i += 1) sizes.push(per);
+  sizes.push(total - per * (count - 1));
+  return sizes;
+}
+
+// Slot map and responses for a pack whose files add up to the total cap;
+// the extra flag appends a one-byte file that pushes the sum one over.
+function totalCapResponses(slots, sizes, extra) {
+  const responses = {};
+  responses[COMMIT_URL] = { status: 200 };
+  sizes.forEach((size, i) => {
+    const file = 'part' + i + '.ogg';
+    slots['s' + i] = file;
+    responses[RAW_BASE + file] = { status: 200, length: size };
+  });
+  if (extra) {
+    slots.extra = 'tiny.ogg';
+    responses[RAW_BASE + 'tiny.ogg'] = { status: 200, length: 1 };
+  }
+  responses[MANIFEST_URL] = { status: 200, text: manifestBody({ slots: slots }) };
+  return responses;
+}
+
+const probeAsyncCases = [
+  ['probe/live', async () => {
+    const responses = liveBase({ hello: 'hello.ogg', bye: 'bye.ogg' });
+    responses[RAW_BASE + 'hello.ogg'] = { status: 200, length: 1024 };
+    responses[RAW_BASE + 'bye.ogg'] = { status: 200, length: 2048 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/live-clean', r.errors.length === 0, r.errors.join('|'));
+    ok('probe/live-touches',
+      r.calls.length === 4 &&
+      r.calls.includes('status ' + COMMIT_URL) &&
+      r.calls.includes('text ' + MANIFEST_URL) &&
+      r.calls.includes('status ' + RAW_BASE + 'hello.ogg') &&
+      r.calls.includes('status ' + RAW_BASE + 'bye.ogg'),
+      r.calls.join('|'));
+  }],
+  ['probe/repo-dead', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 404 };
+    responses[REPO_URL] = { status: 404 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/repo-dead/reason',
+      r.errors.length === 1 && r.errors[0].includes('repo.dead'), r.errors.join('|'));
+    ok('probe/repo-dead/stops-early', r.calls.length === 2, r.calls.join('|'));
+  }],
+  ['probe/commit-dead', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 404 };
+    responses[REPO_URL] = { status: 200 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/commit-dead/reason',
+      r.errors.length === 1 && r.errors[0].includes('commit.dead'), r.errors.join('|'));
+    ok('probe/commit-dead/stops-early', r.calls.length === 2, r.calls.join('|'));
+  }],
+  ['probe/manifest-dead', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 200 };
+    responses[MANIFEST_URL] = { status: 404, text: '' };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/manifest-dead',
+      r.errors.length === 1 && r.errors[0].includes('manifest.dead status=404'),
+      r.errors.join('|'));
+  }],
+  ['probe/manifest-parse-bad-json', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 200 };
+    responses[MANIFEST_URL] = { status: 200, text: '{"id":' };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/manifest-parse-bad-json',
+      r.errors.length === 1 && r.errors[0].includes('manifest.parse'), r.errors.join('|'));
+  }],
+  ['probe/manifest-parse-non-object', async () => {
+    for (const text of ['[1,2]', 'null']) {
+      const responses = {};
+      responses[COMMIT_URL] = { status: 200 };
+      responses[MANIFEST_URL] = { status: 200, text: text };
+      const r = await runProbe(probeFixture(), responses);
+      if (!(r.errors.length === 1 && r.errors[0].includes('manifest.parse'))) {
+        ok('probe/manifest-parse-non-object', false, text + ' gave ' + r.errors.join('|'));
+        return;
+      }
+    }
+    ok('probe/manifest-parse-non-object', true);
+  }],
+  ['probe/manifest-mismatch-id', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 200 };
+    responses[MANIFEST_URL] = {
+      status: 200,
+      text: manifestBody({ id: 'other-pack', slots: { hello: 'hello.ogg' } }),
+    };
+    responses[RAW_BASE + 'hello.ogg'] = { status: 200, length: 10 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/manifest-mismatch-id',
+      r.errors.length === 1 &&
+      r.errors[0].includes('manifest.mismatch id=other-pack version=1.0.0'),
+      r.errors.join('|'));
+  }],
+  ['probe/manifest-mismatch-version', async () => {
+    const responses = {};
+    responses[COMMIT_URL] = { status: 200 };
+    responses[MANIFEST_URL] = {
+      status: 200,
+      text: manifestBody({ version: '9.9.9', slots: { hello: 'hello.ogg' } }),
+    };
+    responses[RAW_BASE + 'hello.ogg'] = { status: 200, length: 10 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/manifest-mismatch-version',
+      r.errors.length === 1 &&
+      r.errors[0].includes('manifest.mismatch id=demo-pack version=9.9.9'),
+      r.errors.join('|'));
+  }],
+  ['probe/manifest-no-slots', async () => {
+    const variants = [
+      ['missing', JSON.stringify({ id: 'demo-pack', version: '1.0.0' })],
+      ['empty', manifestBody({ slots: {} })],
+      ['array', manifestBody({ slots: [] })],
+    ];
+    for (const item of variants) {
+      const responses = {};
+      responses[COMMIT_URL] = { status: 200 };
+      responses[MANIFEST_URL] = { status: 200, text: item[1] };
+      const r = await runProbe(probeFixture(), responses);
+      ok('probe/manifest-no-slots/' + item[0],
+        r.errors.length === 1 && r.errors[0].includes('manifest.no-slots'),
+        item[0] + ' gave ' + r.errors.join('|'));
+    }
+  }],
+  ['probe/audio-dead', async () => {
+    const responses = liveBase({ hello: 'hello.ogg' });
+    responses[RAW_BASE + 'hello.ogg'] = { status: 404 };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-dead',
+      r.errors.length === 1 && r.errors[0].includes('audio.dead slot=hello status=404'),
+      r.errors.join('|'));
+  }],
+  ['probe/audio-path-empty', async () => {
+    const responses = liveBase({ hello: '' });
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-path-empty/reason',
+      r.errors.length === 1 && r.errors[0].includes('audio.path slot=hello'),
+      r.errors.join('|'));
+    ok('probe/audio-path-empty/no-head', r.calls.length === 2, r.calls.join('|'));
+  }],
+  ['probe/audio-path-parent', async () => {
+    const responses = liveBase({ hello: '../secret.ogg' });
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-path-parent/reason',
+      r.errors.length === 1 && r.errors[0].includes('audio.path slot=hello'),
+      r.errors.join('|'));
+    ok('probe/audio-path-parent/no-head', r.calls.length === 2, r.calls.join('|'));
+  }],
+  ['probe/audio-size-at-cap', async () => {
+    const responses = liveBase({ big: 'big.ogg' });
+    responses[RAW_BASE + 'big.ogg'] = { status: 200, length: probe.caps.PER_FILE_CAP_BYTES };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-size-at-cap', r.errors.length === 0, r.errors.join('|'));
+  }],
+  ['probe/audio-size-over-one', async () => {
+    const responses = liveBase({ big: 'big.ogg' });
+    responses[RAW_BASE + 'big.ogg'] = {
+      status: 200,
+      length: probe.caps.PER_FILE_CAP_BYTES + 1,
+    };
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-size-over-one',
+      r.errors.length === 1 &&
+      r.errors[0].includes('audio.size slot=big bytes=' + (probe.caps.PER_FILE_CAP_BYTES + 1)),
+      r.errors.join('|'));
+  }],
+  ['probe/audio-total-at-cap', async () => {
+    const sizes = capFillSizes();
+    const responses = totalCapResponses({}, sizes, false);
+    const r = await runProbe(probeFixture(), responses);
+    const sum = sizes.reduce((a, b) => a + b, 0);
+    const fillSane = sum === probe.caps.TOTAL_CAP_BYTES &&
+      Math.max(...sizes) <= probe.caps.PER_FILE_CAP_BYTES;
+    ok('probe/audio-total-at-cap', fillSane && r.errors.length === 0,
+      'sum=' + sum + ' errors=' + r.errors.join('|'));
+  }],
+  ['probe/audio-total-over-one', async () => {
+    const sizes = capFillSizes();
+    const responses = totalCapResponses({}, sizes, true);
+    const r = await runProbe(probeFixture(), responses);
+    ok('probe/audio-total-over-one',
+      r.errors.length === 1 &&
+      r.errors[0].includes('audio.total-size bytes=' + (probe.caps.TOTAL_CAP_BYTES + 1)),
+      r.errors.join('|'));
+  }],
+  ['probe/entry-not-object', async () => {
+    for (const bad of [null, [1, 2]]) {
+      const r = await runProbe(bad, {});
+      if (!(r.errors.length === 1 && r.errors[0].includes('entry.not-object') &&
+            r.calls.length === 0)) {
+        ok('probe/entry-not-object', false,
+          (bad === null ? 'null' : 'array') + ' gave ' + r.errors.join('|') +
+          ' calls=' + r.calls.length);
+        return;
+      }
+    }
+    ok('probe/entry-not-object', true);
+  }],
+  ['probe/entry-repo-unusable', async () => {
+    const r = await runProbe(probeFixture({ repo: 'https://github.com/a/b' }), {});
+    ok('probe/entry-repo-unusable',
+      r.errors.length === 1 && r.errors[0].includes('repo.unusable') && r.calls.length === 0,
+      r.errors.join('|') + ' calls=' + r.calls.length);
+  }],
+  ['probe/entry-commit-unusable', async () => {
+    const r = await runProbe(probeFixture({ commit: 'abc123' }), {});
+    ok('probe/entry-commit-unusable',
+      r.errors.length === 1 && r.errors[0].includes('commit.unusable') && r.calls.length === 0,
+      r.errors.join('|') + ' calls=' + r.calls.length);
+  }],
+  ['probe/entry-packpath-unusable', async () => {
+    const r = await runProbe(probeFixture({ packPath: '' }), {});
+    ok('probe/entry-packpath-unusable',
+      r.errors.length === 1 && r.errors[0].includes('packPath.unusable') && r.calls.length === 0,
+      r.errors.join('|') + ' calls=' + r.calls.length);
+  }],
+];
+
+async function probeCases() {
+  // caps sanity first: the boundary cases above read these numbers
+  ok('probe/caps-sane',
+    Number.isInteger(probe.caps.PER_FILE_CAP_BYTES) && probe.caps.PER_FILE_CAP_BYTES > 0 &&
+    Number.isInteger(probe.caps.TOTAL_CAP_BYTES) &&
+    probe.caps.TOTAL_CAP_BYTES >= probe.caps.PER_FILE_CAP_BYTES,
+    'per=' + probe.caps.PER_FILE_CAP_BYTES + ' total=' + probe.caps.TOTAL_CAP_BYTES);
+
+  for (const item of probeAsyncCases) {
+    try {
+      await item[1]();
+    } catch (e) {
+      ok(item[0], false, e && e.message ? e.message : String(e));
+    }
+  }
+
+  // explicit argv passes through untouched, without reading the directory
+  const passthrough = probe.collectTargets(['x/a.json', 'y/b.json'], path.join('no', 'such', 'dir'));
+  ok('probe/collect-explicit',
+    Array.isArray(passthrough) && passthrough.length === 2 &&
+    passthrough[0] === 'x/a.json' && passthrough[1] === 'y/b.json',
+    JSON.stringify(passthrough));
+
+  // with no argv only json entries are listed; the placeholder file and
+  // the non-json file stay out
+  const listDir = tmpRoot();
+  fs.writeFileSync(path.join(listDir, 'solo-pack.json'), '{}');
+  fs.writeFileSync(path.join(listDir, '.gitkeep'), '');
+  fs.writeFileSync(path.join(listDir, 'notes.txt'), 'x');
+  const listed = probe.collectTargets([], listDir);
+  ok('probe/collect-default',
+    listed.length === 1 && listed[0] === path.join(listDir, 'solo-pack.json'),
+    JSON.stringify(listed));
+
+  // the workflow must keep the probe job and its step wired into CI
+  let wfRaw = '';
+  try {
+    wfRaw = fs.readFileSync(WORKFLOW, 'utf8');
+  } catch (e) {
+    wfRaw = '';
+  }
+  ok('workflow/probe-job', /^ {2}probe:\s*$/m.test(wfRaw), 'probe job key missing');
+  ok('workflow/step-probe', wfRaw.includes('node probe.js'), 'probe step missing');
+}
+
 // ------------------------------------------------------------------------- report
 
 function writeReport() {
@@ -351,12 +700,28 @@ function writeReport() {
   process.stdout.write('report=' + dir + '\n');
 }
 
-class01To12();
-validCases();
-determinismCases();
-emptyStateCases();
-linkageAndRegistryCases();
-workflowCases();
-argsCases();
-writeReport();
-process.exit(failed === 0 ? 0 : 1);
+// The suite mixes sync child-process cases with async probe cases, so the
+// tail runs only after every case has settled; the report triple and the
+// exit code therefore always cover the full run.
+async function runAll() {
+  class01To12();
+  validCases();
+  determinismCases();
+  emptyStateCases();
+  linkageAndRegistryCases();
+  workflowCases();
+  argsCases();
+  await probeCases();
+}
+
+runAll().then(
+  () => {
+    writeReport();
+    process.exit(failed === 0 ? 0 : 1);
+  },
+  (e) => {
+    ok('harness/no-crash', false, e && e.message ? e.message : String(e));
+    writeReport();
+    process.exit(1);
+  }
+);

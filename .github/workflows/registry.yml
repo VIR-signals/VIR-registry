@@ -1,7 +1,8 @@
-# CI triple gate for registry pull requests.
+# CI gates for registry pull requests.
 # 1. validate: every source entry must pass the entry contract.
 # 2. aggregate: rebuild the index from source entries into a temp file.
 # 3. compare: the rebuild must be byte-identical to registry.json in the PR.
+# 4. probe: every entry must point at a live repo, commit, manifest and audio.
 name: registry
 
 on:
@@ -18,3 +19,9 @@ jobs:
         run: node aggregate.js --out "$RUNNER_TEMP/registry-rebuilt.json"
       - name: compare
         run: git diff --no-index --stat registry.json "$RUNNER_TEMP/registry-rebuilt.json"
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: probe
+        run: node probe.js
