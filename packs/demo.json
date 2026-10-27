@@ -1,0 +1,14 @@
+{
+  "id": "demo",
+  "names": { "zh-cn": "demo 示范语音包", "en": "Demo Voice Pack" },
+  "categories": ["ui"],
+  "language": "none",
+  "author": "VIR Signals",
+  "version": "1.0.0",
+  "repo": "VIR-signals/VIR-demo-pack",
+  "branch": "main",
+  "commit": "e027b2f159db0ee1e98b5e165bf5a13f427e8cf6",
+  "packPath": "pack",
+  "license": "CC0-1.0",
+  "sourceLicense": "third-party-cc0"
+}
